@@ -115,12 +115,27 @@ int main(void)
   MX_TIM6_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
-  FourWheel_LADRC_Init();
+  // 1. 初始化 bxCAN 过滤器 (全通)
+  CAN_FilterTypeDef canFilterConfig;
+  canFilterConfig.FilterBank = 0;
+  canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  canFilterConfig.FilterIdHigh = 0x0000;
+  canFilterConfig.FilterIdLow = 0x0000;
+  canFilterConfig.FilterMaskIdHigh = 0x0000;
+  canFilterConfig.FilterMaskIdLow = 0x0000;
+  canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
+  canFilterConfig.FilterActivation = ENABLE;
+  canFilterConfig.SlaveStartFilterBank = 14;
+  HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
 
-  F4_CAN_Filter_And_Start(); // <--- 补充 CubeMX 初始化坑
+  // 2. 启动 CAN 外设
+  HAL_CAN_Start(&hcan1);
 
-  HAL_Delay(1000);
-  HAL_TIM_Base_Start_IT(&htim6);
+  // 3. 开启 RX FIFO0 接收中断
+  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+
+  printf("=== F4 CAN Receiver Init OK ===\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -182,12 +197,20 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-  if (htim->Instance == TIM6)
-  {
-    FourWheel_LADRC_Control_Loop(); // 先跑闭环
-    F4_CAN_Task_10ms();             // 再跑 CAN 任务
+  CAN_RxHeaderTypeDef RxHeader;
+  uint8_t RxData[8];
+
+  if (hcan->Instance == CAN1) {
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
+      // 收到数据，原样打印出来
+      printf("Got MSG! ID:0x%03lX Data: ", RxHeader.StdId);
+      for(int i = 0; i < RxHeader.DLC; i++) {
+        printf("%02X ", RxData[i]);
+      }
+      printf("\r\n");
+    }
   }
 }
 /* USER CODE END 4 */
