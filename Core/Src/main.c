@@ -50,7 +50,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+/* USER CODE BEGIN PV */
+CAN_RxHeaderTypeDef RxHeader;
+uint8_t RxData[8];
+volatile uint8_t can_rx_flag = 0; // 告诉主程序“有数据来了”的标志位
+/* USER CODE END PV */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,14 +66,17 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 // 完美解决 USB 忙碌丢包的重定向函数
+// 完美解决 USB 忙碌丢包，且防中断死锁的重定向函数
 int _write(int file, char *ptr, int len) {
   uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
-  uint16_t timeout = 0;
-  // 如果 USB 正在忙，最多等 5ms，防止死锁
-  while(result == USBD_BUSY && timeout < 5) {
-    HAL_Delay(1);
-    result = CDC_Transmit_FS((uint8_t*)ptr, len);
+
+  // 使用简单的变量自增来做超时等待，坚决不用 HAL_Delay
+  uint32_t timeout = 0;
+
+  // 50000 只是一个大概的经验值，纯耗费 CPU 周期
+  while(result == USBD_BUSY && timeout < 50000) {
     timeout++;
+    result = CDC_Transmit_FS((uint8_t*)ptr, len);
   }
   return len;
 }
@@ -116,6 +123,7 @@ int main(void)
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
   // 1. 初始化 bxCAN 过滤器 (全通)
+  // 后面的 printf 就能看到了
   CAN_FilterTypeDef canFilterConfig;
   canFilterConfig.FilterBank = 0;
   canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -127,15 +135,17 @@ int main(void)
   canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
   canFilterConfig.FilterActivation = ENABLE;
   canFilterConfig.SlaveStartFilterBank = 14;
-  HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
 
-  // 2. 启动 CAN 外设
-  HAL_CAN_Start(&hcan1);
+  HAL_StatusTypeDef fs = HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
+  printf("Filter: %d\r\n", fs);
 
-  // 3. 开启 RX FIFO0 接收中断
-  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+  HAL_StatusTypeDef ss = HAL_CAN_Start(&hcan1);
+  printf("Start: %d\r\n", ss);
 
-  printf("=== F4 CAN Receiver Init OK ===\r\n");
+  HAL_StatusTypeDef ns = HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+  printf("Notif: %d\r\n", ns);
+
+  printf("=== CAN Ready ===\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -145,7 +155,17 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // 如果标志位被中断立起来了，说明有新数据
+    if (can_rx_flag == 1) {
+      can_rx_flag = 0; // 赶紧先把标志位清零，防止漏掉下一次
 
+      // 在主循环里悠哉游哉地通过 USB 打印，爱怎么耗时就怎么耗时
+      printf("Got MSG! ID:0x%03lX Data: ", RxHeader.StdId);
+      for(int i = 0; i < RxHeader.DLC; i++) {
+        printf("%02X ", RxData[i]);
+      }
+      printf("\r\n");
+    }
     /* USER CODE END WHILE */
   }
   /* USER CODE END 3 */
@@ -199,17 +219,11 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-  CAN_RxHeaderTypeDef RxHeader;
-  uint8_t RxData[8];
-
   if (hcan->Instance == CAN1) {
+    // 1. 光速把数据从 CAN 硬件 FIFO 里捞出来
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-      // 收到数据，原样打印出来
-      printf("Got MSG! ID:0x%03lX Data: ", RxHeader.StdId);
-      for(int i = 0; i < RxHeader.DLC; i++) {
-        printf("%02X ", RxData[i]);
-      }
-      printf("\r\n");
+      // 2. 立起标志位，然后火速退出中断，绝不在这里打印！
+      can_rx_flag = 1;
     }
   }
 }
