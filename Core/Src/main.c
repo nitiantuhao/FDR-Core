@@ -55,7 +55,6 @@ CAN_RxHeaderTypeDef RxHeader;
 uint8_t RxData[8];
 volatile uint8_t can_rx_flag = 0; // 告诉主程序“有数据来了”的标志位
 /* USER CODE END PV */
-/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -65,19 +64,23 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// 完美解决 USB 忙碌丢包的重定向函数
-// 完美解决 USB 忙碌丢包，且防中断死锁的重定向函数
-int _write(int file, char *ptr, int len) {
-  uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
+extern USBD_HandleTypeDef hUsbDeviceFS; // 引入 USB 状态句柄
 
-  // 使用简单的变量自增来做超时等待，坚决不用 HAL_Delay
+int _write(int file, char *ptr, int len) {
+  // 1. 致命拦截：如果电脑压根没连上 USB，直接丢弃数据，坚决不死等！
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
+    return len;
+  }
+
+  uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
   uint32_t timeout = 0;
 
-  // 50000 只是一个大概的经验值，纯耗费 CPU 周期
-  while(result == USBD_BUSY && timeout < 50000) {
+  // 2. 极短超时：就算 USB 连着但突然卡了，最多循环 5000 次就强行放弃，保命要紧
+  while(result == USBD_BUSY && timeout < 5000) {
     timeout++;
     result = CDC_Transmit_FS((uint8_t*)ptr, len);
   }
+
   return len;
 }
 /* USER CODE END 0 */
@@ -137,20 +140,18 @@ int main(void)
   canFilterConfig.SlaveStartFilterBank = 14;
 
   HAL_StatusTypeDef fs = HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
-  printf("Filter: %d\r\n", fs);
-
   HAL_StatusTypeDef ss = HAL_CAN_Start(&hcan1);
-  printf("Start: %d\r\n", ss);
 
+  // 这句开启接收中断的函数极其重要，确认它还在！
   HAL_StatusTypeDef ns = HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
-  printf("Notif: %d\r\n", ns);
 
-  printf("=== CAN Ready ===\r\n");
+  // 💡 修改这里：必须加这一句！给你的电脑 3 秒钟时间去识别 USB 虚拟串口
+  HAL_Delay(3000);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  static uint32_t last_heartbeat = 0;
+
   while (1)
   {
     /* USER CODE END WHILE */
@@ -159,12 +160,6 @@ int main(void)
     // ==========================================
     // 强制打印 1：每隔 1 秒无条件打印一次（心跳包）
     // ==========================================
-    if (HAL_GetTick() - last_heartbeat >= 1000) {
-      last_heartbeat = HAL_GetTick();
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
-      // 只要 USB 串口是好的，你就一定能每秒看到这句话！
-      printf("System Running... Waiting for CAN...\r\n");
-    }
 
     // ==========================================
     // 强制打印 2：原来的 CAN 接收处理逻辑
@@ -172,12 +167,15 @@ int main(void)
     if (can_rx_flag == 1) {
       can_rx_flag = 0; // 赶紧先把标志位清零
 
-      // 加了超级醒目的感叹号，防止看漏
-      printf("!!! BINGO !!! Got CAN MSG! ID:0x%03lX Data: ", RxHeader.StdId);
-      for(int i = 0; i < RxHeader.DLC; i++) {
-        printf("%02X ", RxData[i]);
-      }
-      printf("\r\n");
+      // 💡 修改这里：用一个数组把要发的话拼起来，只调用一次 printf！
+      // 这能彻底防止 168MHz 的 CPU 把 USB 虚拟串口瞬间撑爆死机
+      char usb_buf[100];
+      sprintf(usb_buf, "!!! BINGO !!! Got CAN MSG! ID:0x%03lX Data: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+              RxHeader.StdId,
+              RxData[0], RxData[1], RxData[2], RxData[3],
+              RxData[4], RxData[5], RxData[6], RxData[7]);
+
+      printf("%s", usb_buf);
     }
     /* USER CODE END WHILE */
   }
