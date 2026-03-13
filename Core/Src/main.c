@@ -69,7 +69,10 @@ void SystemClock_Config(void);
 extern USBD_HandleTypeDef hUsbDeviceFS; // 引入 USB 状态句柄
 
 int _write(int file, char *ptr, int len) {
-  HAL_UART_Transmit(&huart4, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+  for (int i = 0; i < len; i++) {
+    HAL_UART_Transmit(&huart4, (uint8_t*)&ptr[i], 1, 1000);
+    HAL_Delay(1);  // 每个字符间隔 1ms
+  }
   return len;
 }
 /* USER CODE END 0 */
@@ -115,9 +118,9 @@ int main(void)
   MX_CAN1_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-  // 1. 初始化 bxCAN 过滤器 (全通)
-  // 后面的 printf 就能看到了
-  CAN_FilterTypeDef canFilterConfig;
+// 1. 结构体一定要初始化为 0！
+  CAN_FilterTypeDef canFilterConfig = {0};
+
   canFilterConfig.FilterBank = 0;
   canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
   canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
@@ -127,16 +130,16 @@ int main(void)
   canFilterConfig.FilterMaskIdLow = 0x0000;
   canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
   canFilterConfig.FilterActivation = ENABLE;
+
+  // 2. 加上这极其关键的一句，把 0-13 号过滤器分给 CAN1
   canFilterConfig.SlaveStartFilterBank = 14;
 
   HAL_StatusTypeDef fs = HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
   HAL_StatusTypeDef ss = HAL_CAN_Start(&hcan1);
-
-  // 这句开启接收中断的函数极其重要，确认它还在！
   HAL_StatusTypeDef ns = HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
 
-  // 💡 修改这里：必须加这一句！给你的电脑 3 秒钟时间去识别 USB 虚拟串口
-  HAL_Delay(3000);
+  HAL_Delay(1000);
+  printf("Filter: %d, Start: %d, Notify: %d\r\n", fs, ss, ns);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -154,6 +157,11 @@ int main(void)
     // ==========================================
     // 强制打印 2：原来的 CAN 接收处理逻辑
     // ==========================================
+    uint32_t fifo_pending = HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0);
+    if (fifo_pending > 0) {
+      printf("FIFO has %lu messages\r\n", fifo_pending);
+    }
+
     if (can_rx_flag == 1) {
       can_rx_flag = 0; // 赶紧先把标志位清零
 
