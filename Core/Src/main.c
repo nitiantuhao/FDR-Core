@@ -222,12 +222,12 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan->Instance == CAN1) {
     // 翻转 LED 看看有没有进中断
-    HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
 
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
       can_rx_flag = 1;
       // 再翻转一次，确认消息取出成功
-      HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
     }
   }
 }
