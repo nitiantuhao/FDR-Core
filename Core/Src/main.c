@@ -150,17 +150,30 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  static uint32_t last_heartbeat = 0;
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // 如果标志位被中断立起来了，说明有新数据
-    if (can_rx_flag == 1) {
-      can_rx_flag = 0; // 赶紧先把标志位清零，防止漏掉下一次
+    // ==========================================
+    // 强制打印 1：每隔 1 秒无条件打印一次（心跳包）
+    // ==========================================
+    if (HAL_GetTick() - last_heartbeat >= 1000) {
+      last_heartbeat = HAL_GetTick();
+      HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+      // 只要 USB 串口是好的，你就一定能每秒看到这句话！
+      printf("System Running... Waiting for CAN...\r\n");
+    }
 
-      // 在主循环里悠哉游哉地通过 USB 打印，爱怎么耗时就怎么耗时
-      printf("Got MSG! ID:0x%03lX Data: ", RxHeader.StdId);
+    // ==========================================
+    // 强制打印 2：原来的 CAN 接收处理逻辑
+    // ==========================================
+    if (can_rx_flag == 1) {
+      can_rx_flag = 0; // 赶紧先把标志位清零
+
+      // 加了超级醒目的感叹号，防止看漏
+      printf("!!! BINGO !!! Got CAN MSG! ID:0x%03lX Data: ", RxHeader.StdId);
       for(int i = 0; i < RxHeader.DLC; i++) {
         printf("%02X ", RxData[i]);
       }
