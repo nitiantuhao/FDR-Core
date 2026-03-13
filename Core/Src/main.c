@@ -3,6 +3,7 @@
 #include "ladrc.h"
 #include "usbd_cdc_if.h" // USB 虚拟串口发送头文件
 #include "f4_can_app.h"
+#include "usart.h"
 /**
   ******************************************************************************
   * @file           : main.c
@@ -24,6 +25,7 @@
 #include "main.h"
 #include "can.h"
 #include "tim.h"
+#include "usart.h"
 #include "usb_device.h"
 #include "gpio.h"
 
@@ -67,20 +69,7 @@ void SystemClock_Config(void);
 extern USBD_HandleTypeDef hUsbDeviceFS; // 引入 USB 状态句柄
 
 int _write(int file, char *ptr, int len) {
-  // 1. 致命拦截：如果电脑压根没连上 USB，直接丢弃数据，坚决不死等！
-  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
-    return len;
-  }
-
-  uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
-  uint32_t timeout = 0;
-
-  // 2. 极短超时：就算 USB 连着但突然卡了，最多循环 5000 次就强行放弃，保命要紧
-  while(result == USBD_BUSY && timeout < 5000) {
-    timeout++;
-    result = CDC_Transmit_FS((uint8_t*)ptr, len);
-  }
-
+  HAL_UART_Transmit(&huart4, (uint8_t*)ptr, len, HAL_MAX_DELAY);
   return len;
 }
 /* USER CODE END 0 */
@@ -124,6 +113,7 @@ int main(void)
   MX_TIM9_Init();
   MX_TIM6_Init();
   MX_CAN1_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   // 1. 初始化 bxCAN 过滤器 (全通)
   // 后面的 printf 就能看到了
@@ -231,10 +221,13 @@ void SystemClock_Config(void)
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan->Instance == CAN1) {
-    // 1. 光速把数据从 CAN 硬件 FIFO 里捞出来
+    // 翻转 LED 看看有没有进中断
+    HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-      // 2. 立起标志位，然后火速退出中断，绝不在这里打印！
       can_rx_flag = 1;
+      // 再翻转一次，确认消息取出成功
+      HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
     }
   }
 }
