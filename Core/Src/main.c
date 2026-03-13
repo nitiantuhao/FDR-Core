@@ -161,7 +161,7 @@ int main(void)
     // ==========================================
     if (HAL_GetTick() - last_heartbeat >= 1000) {
       last_heartbeat = HAL_GetTick();
-      HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
       // 只要 USB 串口是好的，你就一定能每秒看到这句话！
       printf("System Running... Waiting for CAN...\r\n");
     }
