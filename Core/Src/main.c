@@ -69,10 +69,20 @@ void SystemClock_Config(void);
 extern USBD_HandleTypeDef hUsbDeviceFS; // 引入 USB 状态句柄
 
 int _write(int file, char *ptr, int len) {
-  for (int i = 0; i < len; i++) {
-    HAL_UART_Transmit(&huart4, (uint8_t*)&ptr[i], 1, 1000);
-    HAL_Delay(1);  // 每个字符间隔 1ms
+  // 1. 致命拦截：如果电脑压根没连上 USB，直接丢弃数据，坚决不死等！
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
+    return len;
   }
+
+  uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
+  uint32_t timeout = 0;
+
+  // 2. 极短超时：就算 USB 连着但突然卡了，最多循环 5000 次就强行放弃，保命要紧
+  while(result == USBD_BUSY && timeout < 5000) {
+    timeout++;
+    result = CDC_Transmit_FS((uint8_t*)ptr, len);
+  }
+
   return len;
 }
 /* USER CODE END 0 */
