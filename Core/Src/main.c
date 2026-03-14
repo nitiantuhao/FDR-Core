@@ -1,4 +1,5 @@
 /* USER CODE BEGIN Header */
+
 #include <stdio.h>
 #include "ladrc.h"
 #include "usbd_cdc_if.h" // USB 虚拟串口发送头文件
@@ -41,7 +42,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define TELEMETRY_TX_PERIOD_MS    20U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,10 +53,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-/* USER CODE BEGIN PV */
-CAN_RxHeaderTypeDef RxHeader;
-uint8_t RxData[8];
-volatile uint8_t can_rx_flag = 0; // 告诉主程序“有数据来了”的标志位
+extern USBD_HandleTypeDef hUsbDeviceFS;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,24 +64,34 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-extern USBD_HandleTypeDef hUsbDeviceFS; // 引入 USB 状态句柄
+int _write(int file, char *ptr, int len)
+{
+  uint32_t start_tick;
+  uint8_t result;
 
-int _write(int file, char *ptr, int len) {
-  // 1. 致命拦截：如果电脑压根没连上 USB，直接丢弃数据，坚决不死等！
-  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
-    return len;
+  (void)file;
+
+  if ((ptr == NULL) || (len <= 0))
+  {
+    return 0;
   }
 
-  uint8_t result = CDC_Transmit_FS((uint8_t*)ptr, len);
-  uint32_t timeout = 0;
-
-  // 2. 极短超时：就算 USB 连着但突然卡了，最多循环 5000 次就强行放弃，保命要紧
-  while(result == USBD_BUSY && timeout < 5000) {
-    timeout++;
-    result = CDC_Transmit_FS((uint8_t*)ptr, len);
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED)
+  {
+    return 0;
   }
 
-  return len;
+  start_tick = HAL_GetTick();
+  do
+  {
+    result = CDC_Transmit_FS((uint8_t *)ptr, (uint16_t)len);
+    if (result == USBD_OK)
+    {
+      return len;
+    }
+  } while ((result == USBD_BUSY) && ((HAL_GetTick() - start_tick) < 2U));
+
+  return 0;
 }
 /* USER CODE END 0 */
 
@@ -128,28 +136,14 @@ int main(void)
   MX_CAN1_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-// 1. 结构体一定要初始化为 0！
-  CAN_FilterTypeDef canFilterConfig = {0};
+  FourWheel_LADRC_Init();
+  CAN_App_Init();
 
-  canFilterConfig.FilterBank = 0;
-  canFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
-  canFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
-  canFilterConfig.FilterIdHigh = 0x0000;
-  canFilterConfig.FilterIdLow = 0x0000;
-  canFilterConfig.FilterMaskIdHigh = 0x0000;
-  canFilterConfig.FilterMaskIdLow = 0x0000;
-  canFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
-  canFilterConfig.FilterActivation = ENABLE;
-
-  // 2. 加上这极其关键的一句，把 0-13 号过滤器分给 CAN1
-  canFilterConfig.SlaveStartFilterBank = 14;
-
-  HAL_StatusTypeDef fs = HAL_CAN_ConfigFilter(&hcan1, &canFilterConfig);
-  HAL_StatusTypeDef ss = HAL_CAN_Start(&hcan1);
-  HAL_StatusTypeDef ns = HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
-
-  HAL_Delay(1000);
-  printf("Filter: %d, Start: %d, Notify: %d\r\n", fs, ss, ns);
+  /* 启动 10ms 硬实时控制节拍。 */
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -160,31 +154,42 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // ==========================================
-    // 强制打印 1：每隔 1 秒无条件打印一次（心跳包）
-    // ==========================================
+    /*
+     * 20ms 周期发送的“无漂移（driftless）”调度器：
+     *
+     * 之前版本用 last = now 的写法：
+     *   if (now - last >= period) { last = now; ... }
+     * 在主循环存在抖动/阻塞时会把“相位”带着一起漂移，表现为 20ms 周期不再对齐。
+     *
+     * 这里改成 next_deadline += period 的写法，让发送时刻尽量锁在固定相位上；
+     * 若主循环被阻塞太久（落后 >= 1 个周期），则做一次“软重同步”，避免一口气补发多次造成总线突发。
+     */
+    static uint32_t next_telemetry_deadline = 0U;
+    uint32_t now = HAL_GetTick();
 
-    // ==========================================
-    // 强制打印 2：原来的 CAN 接收处理逻辑
-    // ==========================================
-    uint32_t fifo_pending = HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0);
-    if (fifo_pending > 0) {
-      printf("FIFO has %lu messages\r\n", fifo_pending);
+    if (next_telemetry_deadline == 0U)
+    {
+      next_telemetry_deadline = now + TELEMETRY_TX_PERIOD_MS;
     }
 
-    if (can_rx_flag == 1) {
-      can_rx_flag = 0; // 赶紧先把标志位清零
+    if ((int32_t)(now - next_telemetry_deadline) >= 0)
+    {
+      next_telemetry_deadline += TELEMETRY_TX_PERIOD_MS;
+      CAN_Send_Telemetry_20ms();
 
-      // 💡 修改这里：用一个数组把要发的话拼起来，只调用一次 printf！
-      // 这能彻底防止 168MHz 的 CPU 把 USB 虚拟串口瞬间撑爆死机
-      char usb_buf[100];
-      sprintf(usb_buf, "!!! BINGO !!! Got CAN MSG! ID:0x%03lX Data: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-              RxHeader.StdId,
-              RxData[0], RxData[1], RxData[2], RxData[3],
-              RxData[4], RxData[5], RxData[6], RxData[7]);
-
-      printf("%s", usb_buf);
+      /* 如果主循环太慢导致仍然落后（>= 1 周期），重同步，避免连发突刺。 */
+      if ((int32_t)(now - next_telemetry_deadline) >= 0)
+      {
+        next_telemetry_deadline = now + TELEMETRY_TX_PERIOD_MS;
+        /* 可选：在这里置一个诊断位，提示“Telemetry Late”。 */
+        /* CAN_Report_TelemetryLate(); */
+      }
     }
+
+    /*
+     * 主循环保持轻量。
+     * 如果后续要加 LED、串口 shell、参数配置等慢任务，尽量都放这里。
+     */
     /* USER CODE END WHILE */
   }
   /* USER CODE END 3 */
@@ -236,17 +241,23 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+/**
+  * @brief  定时器周期中断回调。
+  * @note   TIM6 是整个底盘控制的“硬实时心跳”。
+  *         固定顺序：
+  *         1) 控制命令看门狗
+  *         2) 差速逆解算
+  *         3) 四轮 LADRC 闭环
+  *         4) 基于最新反馈做故障诊断
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (hcan->Instance == CAN1) {
-    // 翻转 LED 看看有没有进中断
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
-
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-      can_rx_flag = 1;
-      // 再翻转一次，确认消息取出成功
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
-    }
+  if (htim->Instance == TIM6)
+  {
+    CAN_Safety_Watchdog_Tick();
+    Kinematics_Update_LADRC();
+    FourWheel_LADRC_Control_Loop();
+    Chassis_Diagnostics_10ms_Tick();
   }
 }
 /* USER CODE END 4 */

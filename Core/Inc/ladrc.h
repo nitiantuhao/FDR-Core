@@ -35,15 +35,19 @@ float LADRC_Calc(LADRC_TypeDef *ladrc, float actual_val);
 /* ================= 针对四轮底盘的 LADRC 扩展调度层 ================= */
 
 // 将 4 个控制器暴露出来，方便 main.c 里面调取数据用 VOFA+ 打印波形
-extern LADRC_TypeDef ladrc_motors[4]; 
+extern LADRC_TypeDef ladrc_motors[4];
 
-// 1. 初始化：一键初始化底层定时器和4个LADRC控制器
+/* 1. 初始化：一键初始化底层定时器和4个LADRC控制器 */
 void FourWheel_LADRC_Init(void);
 
-// 2. 设定目标转速：给四个轮子下发指令
+/* 2. 设定目标转速：给四个轮子下发指令 */
 void FourWheel_Set_Target_RPM(float fl_rpm, float rl_rpm, float fr_rpm, float rr_rpm);
 
-// 3. 核心闭环运算：必须且只能在 10ms 基础定时器中断里调用
+/* 3. 核心闭环运算：必须且只能在 10ms 基础定时器中断里调用 */
 void FourWheel_LADRC_Control_Loop(void);
+
+/* 4. 诊断/状态上报接口：读取每个轮子的目标转速和控制输出 */
+float FourWheel_Get_Target_RPM(Motor_ID_t id);
+float FourWheel_Get_Control_Output(Motor_ID_t id);
 
 #endif /* __LADRC_H */
