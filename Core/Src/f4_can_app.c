@@ -426,6 +426,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
     }
 
     CAN_AtomicIncU32(&s_valid_cmd_total);
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
 }
 
 /* =====================================================================
