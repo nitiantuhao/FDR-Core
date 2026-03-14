@@ -381,6 +381,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
 
     if (!accept_frame)
     {
+        g_dbg_cnt_reject++;
         CAN_AtomicIncU32(&s_counter_reject_total);
         CAN_AtomicIncU8Saturated(&s_consecutive_counter_errors, 0xFFU);
 
@@ -432,6 +433,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
     }
 
     CAN_AtomicIncU32(&s_valid_cmd_total);
+    g_dbg_valid_accept++;
     HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
 }
 
