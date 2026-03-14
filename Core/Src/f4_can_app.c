@@ -5,7 +5,11 @@
 
 #include "ladrc.h"
 #include "motor.h"
-
+volatile uint32_t g_dbg_rx_100_hits = 0U;
+volatile uint32_t g_dbg_dlc_reject = 0U;
+volatile uint32_t g_dbg_crc_reject = 0U;
+volatile uint32_t g_dbg_cnt_reject = 0U;
+volatile uint32_t g_dbg_valid_accept = 0U;
 /*
  * 下面两个 getter 由 ladrc.c 提供，用于诊断层读取每个轮子的目标值与控制输出。
  * 之所以在这里做前向声明，是为了尽量少改你原工程里现有的 ladrc.h。
@@ -343,6 +347,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
 
     if (dlc != 8U)
     {
+        g_dbg_dlc_reject++;
         return;
     }
 
@@ -355,6 +360,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
         {
             CAN_EnterSafeFault(DIAG_CMD_CRC_STORM, true);
         }
+        g_dbg_crc_reject++;
         return;
     }
 
@@ -511,6 +517,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         }
         else if (rx_header.StdId == CAN_ID_CMD_VEL)
         {
+            g_dbg_rx_100_hits++;
             CAN_ProcessControlFrame(rx_data, rx_header.DLC);
         }
         else
