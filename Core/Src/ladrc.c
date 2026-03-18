@@ -1,4 +1,5 @@
 #include "ladrc.h"
+#include "f4_can_app.h"
 
 /*
  * 这个文件实现两层内容：
@@ -20,6 +21,9 @@
 /* ================== 内部辅助函数 ================== */
 static float LADRC_Abs(float x);
 static float LADRC_Clamp(float x, float min_value, float max_value);
+static void LADRC_ResetStates(LADRC_TypeDef *ladrc);
+
+static float s_filtered_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 static float LADRC_Abs(float x)
 {
@@ -37,6 +41,20 @@ static float LADRC_Clamp(float x, float min_value, float max_value)
         return min_value;
     }
     return x;
+}
+
+static void LADRC_ResetStates(LADRC_TypeDef *ladrc)
+{
+    if (ladrc == NULL)
+    {
+        return;
+    }
+
+    ladrc->v = 0.0f;
+    ladrc->y = 0.0f;
+    ladrc->z1 = 0.0f;
+    ladrc->z2 = 0.0f;
+    ladrc->u = 0.0f;
 }
 
 /**
@@ -145,7 +163,21 @@ void FourWheel_LADRC_Init(void)
                    LADRC_DEFAULT_B0,
                    LADRC_CONTROL_DT_S,
                    LADRC_DEFAULT_OUT_MAX);
+        s_filtered_rpm[i] = 0.0f;
     }
+}
+
+void FourWheel_LADRC_ResetAll(void)
+{
+    int i;
+
+    for (i = 0; i < 4; ++i)
+    {
+        LADRC_ResetStates(&ladrc_motors[i]);
+        s_filtered_rpm[i] = 0.0f;
+    }
+
+    Motor_Brake_All();
 }
 
 /**
@@ -169,20 +201,25 @@ void FourWheel_Set_Target_RPM(float fl_rpm, float rl_rpm, float fr_rpm, float rr
   */
 void FourWheel_LADRC_Control_Loop(void)
 {
-    static float filtered_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     int i;
 
     Motor_Update_RPM(LADRC_CONTROL_DT_S);
+
+    if (g_robot_ctrl.state != SYSTEM_OPERATIONAL)
+    {
+        FourWheel_LADRC_ResetAll();
+        return;
+    }
 
     for (i = 0; i < 4; ++i)
     {
         float raw_rpm = Get_Motor_RPM((Motor_ID_t)i);
         float pwm_out;
 
-        filtered_rpm[i] = (1.0f - LADRC_RPM_FILTER_ALPHA) * filtered_rpm[i]
-                        + LADRC_RPM_FILTER_ALPHA * raw_rpm;
+        s_filtered_rpm[i] = (1.0f - LADRC_RPM_FILTER_ALPHA) * s_filtered_rpm[i]
+                          + LADRC_RPM_FILTER_ALPHA * raw_rpm;
 
-        pwm_out = LADRC_Calc(&ladrc_motors[i], filtered_rpm[i]);
+        pwm_out = LADRC_Calc(&ladrc_motors[i], s_filtered_rpm[i]);
         Set_Motor_Output((Motor_ID_t)i, (int16_t)pwm_out);
     }
 }

@@ -43,10 +43,13 @@ void FourWheel_LADRC_Init(void);
 /* 2. 设定目标转速：给四个轮子下发指令 */
 void FourWheel_Set_Target_RPM(float fl_rpm, float rl_rpm, float fr_rpm, float rr_rpm);
 
-/* 3. 核心闭环运算：必须且只能在 10ms 基础定时器中断里调用 */
+/* 3. 故障/停机时立即清零控制器内部状态并断驱 */
+void FourWheel_LADRC_ResetAll(void);
+
+/* 4. 核心闭环运算：必须且只能在 10ms 基础定时器中断里调用 */
 void FourWheel_LADRC_Control_Loop(void);
 
-/* 4. 诊断/状态上报接口：读取每个轮子的目标转速和控制输出 */
+/* 5. 诊断/状态上报接口：读取每个轮子的目标转速和控制输出 */
 float FourWheel_Get_Target_RPM(Motor_ID_t id);
 float FourWheel_Get_Control_Output(Motor_ID_t id);
 

@@ -21,7 +21,7 @@ typedef enum
 {
     SYSTEM_BOOTING = 0,   /* 上电启动，尚未收到第一帧合法速度命令。 */
     SYSTEM_OPERATIONAL,   /* 正常工作，允许按目标速度运动。 */
-    SYSTEM_SAFE_FAULT     /* 安全保护：目标速度已被强制清零。 */
+    SYSTEM_SAFE_FAULT     /* 安全保护：目标速度强制清零，控制器内部状态清零，并禁止继续驱动。 */
 } System_State_t;
 
 /* ================== 健康等级定义 ================== */
@@ -101,13 +101,13 @@ extern volatile Robot_Control_t g_robot_ctrl;
  *     Byte6   : cmd_age_10ms
  *     Byte7   : status rolling counter
  *
- * Tx: 0x182 实际轮速帧（20ms）
+ * Tx: 0x182 实际轮速帧（轮询，约 60ms）
  *     Byte0~1 : FL 实际 RPM, int16 little-endian
  *     Byte2~3 : RL 实际 RPM
  *     Byte4~5 : FR 实际 RPM
  *     Byte6~7 : RR 实际 RPM
  *
- * Tx: 0x183 目标轮速帧（20ms）
+ * Tx: 0x183 目标轮速帧（轮询，约 60ms）
  *     Byte0~1 : FL 目标 RPM, int16 little-endian
  *     Byte2~3 : RL 目标 RPM
  *     Byte4~5 : FR 目标 RPM
@@ -123,7 +123,7 @@ extern volatile Robot_Control_t g_robot_ctrl;
  *     Byte6   : last accepted rolling counter
  *     Byte7   : [7:4] 连续 counter 错误计数(饱和到15), [3:0] 连续 CRC 错误计数(饱和到15)
  *
- * Tx: 0x200 里程计增量帧（20ms）
+ * Tx: 0x200 里程计增量帧（轮询，约 60ms）
  *     Byte0~1 : FL delta ticks, int16 little-endian
  *     Byte2~3 : RL delta ticks
  *     Byte4~5 : FR delta ticks
@@ -151,7 +151,7 @@ void CAN_Safety_Watchdog_Tick(void);
 /*
  * 10ms 周期调用：
  * - 从最近一次完整一致的目标命令快照进行差速解算
- * - 在 SAFE_FAULT / BOOTING 下强制目标轮速为 0
+ * - 在 SAFE_FAULT / BOOTING 下强制目标轮速为 0，并禁止继续输出驱动
  */
 void Kinematics_Update_LADRC(void);
 

@@ -34,6 +34,7 @@ volatile uint32_t g_dbg_valid_accept = 0U;
 #define CMD_TIMEOUT_MS                    150U
 #define MAX_ACCEPTED_COUNTER_GAP          3U
 #define TELEMETRY_COMM_DIAG_DIV           5U   /* 20ms * 5 = 100ms */
+#define CAN_RX_ISR_MAX_FRAMES_PER_CALL      2U
 
 /* ================= 通信故障判定参数 ================= */
 #define CRC_STORM_THRESHOLD               5U
@@ -63,8 +64,9 @@ volatile Robot_Control_t g_robot_ctrl = {
  * 只用“合法且新鲜”的 0x100 控制帧喂运动看门狗。
  * 这样即使上位机还在发心跳，但速度命令停了，底盘也会在超时后安全停车。
  */
-static volatile uint16_t s_cmd_watchdog_ms = 0U;
+static volatile uint32_t s_last_valid_cmd_tick_ms = 0U;
 static volatile uint8_t s_cmd_age_10ms = 0U;
+static volatile bool s_have_seen_valid_cmd = false;
 
 /* 最近一次接受的 rolling counter，同步状态用于首帧/故障恢复。 */
 static volatile uint8_t s_last_rx_counter = 0U;
@@ -300,11 +302,12 @@ static void CAN_EnterSafeFault(uint32_t reason_bits, bool desync_counter)
 
     if (desync_counter)
     {
-        s_cmd_watchdog_ms = 0U;
         s_counter_synced = false;
     }
 
     __set_PRIMASK(primask);
+
+    FourWheel_LADRC_ResetAll();
 }
 
 static System_Health_t CAN_GetCurrentHealth(uint32_t diag_bits, System_State_t state)
@@ -354,6 +357,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
     if (CAN_CRC8_SAE_J1850(rx_data, 7U) != rx_data[7])
     {
         CAN_AtomicIncU32(&s_crc_error_total);
+        s_consecutive_counter_errors = 0U;
         CAN_AtomicIncU8Saturated(&s_consecutive_crc_errors, 0xFFU);
 
         if (s_consecutive_crc_errors >= CRC_STORM_THRESHOLD)
@@ -383,6 +387,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
     {
         g_dbg_cnt_reject++;
         CAN_AtomicIncU32(&s_counter_reject_total);
+        s_consecutive_crc_errors = 0U;
         CAN_AtomicIncU8Saturated(&s_consecutive_counter_errors, 0xFFU);
 
         if (s_consecutive_counter_errors >= COUNTER_STORM_THRESHOLD)
@@ -407,7 +412,8 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
 
         s_last_rx_counter = rx_cnt;
         s_counter_synced = true;
-        s_cmd_watchdog_ms = CMD_TIMEOUT_MS;
+        s_last_valid_cmd_tick_ms = HAL_GetTick();
+        s_have_seen_valid_cmd = true;
         s_cmd_age_10ms = 0U;
 
         /* 合法新帧到来后，允许通信相关与执行器相关的自动恢复。 */
@@ -453,8 +459,9 @@ void CAN_App_Init(void)
     g_robot_ctrl.rolling_cnt = 0U;
     g_robot_ctrl.state = SYSTEM_BOOTING;
 
-    s_cmd_watchdog_ms = 0U;
+    s_last_valid_cmd_tick_ms = 0U;
     s_cmd_age_10ms = 0U;
+    s_have_seen_valid_cmd = false;
     s_last_rx_counter = 0U;
     s_counter_synced = false;
 
@@ -493,12 +500,15 @@ void CAN_App_Init(void)
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
+    uint8_t frames_processed = 0U;
+
     if (hcan != &hcan1)
     {
         return;
     }
 
-    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0U)
+    while ((frames_processed < CAN_RX_ISR_MAX_FRAMES_PER_CALL) &&
+           (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0U))
     {
         CAN_RxHeaderTypeDef rx_header;
         uint8_t rx_data[8];
@@ -507,6 +517,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         {
             break;
         }
+
+        frames_processed++;
 
         if ((rx_header.IDE != CAN_ID_STD) || (rx_header.RTR != CAN_RTR_DATA))
         {
@@ -560,33 +572,28 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
 
 void CAN_Safety_Watchdog_Tick(void)
 {
-    uint32_t primask;
+    uint32_t elapsed_ms = 0U;
+    uint32_t age_ticks = 0U;
 
-    if (s_cmd_age_10ms < 0xFFU)
+    if (!s_have_seen_valid_cmd)
     {
-        primask = __get_PRIMASK();
-        __disable_irq();
-        if (s_cmd_age_10ms < 0xFFU)
-        {
-            s_cmd_age_10ms = (uint8_t)(s_cmd_age_10ms + 1U);
-        }
-        __set_PRIMASK(primask);
+        s_cmd_age_10ms = 0U;
+        return;
     }
 
-    if (s_cmd_watchdog_ms > CONTROL_LOOP_PERIOD_MS)
+    elapsed_ms = HAL_GetTick() - s_last_valid_cmd_tick_ms;
+    age_ticks = elapsed_ms / CONTROL_LOOP_PERIOD_MS;
+
+    if (age_ticks > 0xFFU)
     {
-        primask = __get_PRIMASK();
-        __disable_irq();
-        s_cmd_watchdog_ms = (uint16_t)(s_cmd_watchdog_ms - CONTROL_LOOP_PERIOD_MS);
-        __set_PRIMASK(primask);
+        age_ticks = 0xFFU;
     }
-    else if (s_cmd_watchdog_ms > 0U)
+
+    s_cmd_age_10ms = (uint8_t)age_ticks;
+
+    if ((g_robot_ctrl.state == SYSTEM_OPERATIONAL) && (elapsed_ms >= CMD_TIMEOUT_MS))
     {
         CAN_EnterSafeFault(DIAG_COMM_TIMEOUT, true);
-    }
-    else
-    {
-        /* BOOTING / SAFE_FAULT 期间不重复处理。 */
     }
 }
 
