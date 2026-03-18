@@ -75,6 +75,9 @@ static volatile bool s_counter_synced = false;
 /* 当前活动中的诊断位图。 */
 static volatile uint32_t s_diag_bits = 0U;
 
+/* 需要“重启后才恢复”的锁存故障位。当前仅对 STALL 生效。 */
+static volatile uint32_t s_latched_fault_bits = 0U;
+
 /* 通信统计计数器：全部为累加值，方便上位机做趋势诊断。 */
 static volatile uint32_t s_valid_cmd_total = 0U;
 static volatile uint32_t s_crc_error_total = 0U;
@@ -293,12 +296,22 @@ static void CAN_ResetMotionCommand(void)
 static void CAN_EnterSafeFault(uint32_t reason_bits, bool desync_counter)
 {
     uint32_t primask = __get_PRIMASK();
+    uint32_t stall_mask = (DIAG_MOTOR_FL_STALL |
+                           DIAG_MOTOR_RL_STALL |
+                           DIAG_MOTOR_FR_STALL |
+                           DIAG_MOTOR_RR_STALL);
 
     __disable_irq();
 
     g_robot_ctrl.state = SYSTEM_SAFE_FAULT;
     CAN_ResetMotionCommand();
     s_diag_bits |= reason_bits;
+
+    /* 方案 A：
+     * 只要是 STALL，就锁存起来，后续普通 0x100 也不允许清掉，
+     * 只能靠重启在 CAN_App_Init() 中清零。
+     */
+    s_latched_fault_bits |= (reason_bits & stall_mask);
 
     if (desync_counter)
     {
@@ -307,6 +320,7 @@ static void CAN_EnterSafeFault(uint32_t reason_bits, bool desync_counter)
 
     __set_PRIMASK(primask);
 
+    /* 立即清 LADRC 内部状态并刹车。 */
     FourWheel_LADRC_ResetAll();
 }
 
@@ -347,6 +361,10 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
 {
     bool accept_frame = false;
     uint8_t rx_cnt;
+    uint32_t stall_mask = (DIAG_MOTOR_FL_STALL |
+                           DIAG_MOTOR_RL_STALL |
+                           DIAG_MOTOR_FR_STALL |
+                           DIAG_MOTOR_RR_STALL);
 
     if (dlc != 8U)
     {
@@ -364,6 +382,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
         {
             CAN_EnterSafeFault(DIAG_CMD_CRC_STORM, true);
         }
+
         g_dbg_crc_reject++;
         return;
     }
@@ -394,6 +413,7 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
         {
             CAN_EnterSafeFault(DIAG_CMD_CNT_STORM, true);
         }
+
         return;
     }
 
@@ -404,11 +424,13 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
 
         __disable_irq();
 
+        /* 无论是否锁存 STALL，都更新“最近一次合法命令”的通信状态，
+         * 这样状态帧/诊断帧仍然能正确反映链路是活着的。
+         */
         g_robot_ctrl.target_vx = (float)vx_scaled / 1000.0f;
         g_robot_ctrl.target_wz = (float)wz_scaled / 1000.0f;
         g_robot_ctrl.ctrl_flags = rx_data[4];
         g_robot_ctrl.rolling_cnt = rx_cnt;
-        g_robot_ctrl.state = SYSTEM_OPERATIONAL;
 
         s_last_rx_counter = rx_cnt;
         s_counter_synced = true;
@@ -416,24 +438,41 @@ static void CAN_ProcessControlFrame(const uint8_t *rx_data, uint8_t dlc)
         s_have_seen_valid_cmd = true;
         s_cmd_age_10ms = 0U;
 
-        /* 合法新帧到来后，允许通信相关与执行器相关的自动恢复。 */
+        /* 合法新帧到来后，只允许“通信类”故障自动恢复。 */
         s_consecutive_crc_errors = 0U;
         s_consecutive_counter_errors = 0U;
-        s_stall_ticks[MOTOR_FL] = 0U;
-        s_stall_ticks[MOTOR_RL] = 0U;
-        s_stall_ticks[MOTOR_FR] = 0U;
-        s_stall_ticks[MOTOR_RR] = 0U;
         s_saturation_ticks = 0U;
 
         s_diag_bits &= ~(DIAG_COMM_TIMEOUT |
                          DIAG_CAN_BUS_OFF |
                          DIAG_CMD_CRC_STORM |
                          DIAG_CMD_CNT_STORM |
-                         DIAG_MOTOR_FL_STALL |
-                         DIAG_MOTOR_RL_STALL |
-                         DIAG_MOTOR_FR_STALL |
-                         DIAG_MOTOR_RR_STALL |
                          DIAG_CONTROL_SATURATION);
+
+        /* STALL 计数器可以清零，避免恢复后立刻再次沿用旧计数；
+         * 但 STALL 故障位本身不能自动清除，因为它已被锁存。
+         */
+        s_stall_ticks[MOTOR_FL] = 0U;
+        s_stall_ticks[MOTOR_RL] = 0U;
+        s_stall_ticks[MOTOR_FR] = 0U;
+        s_stall_ticks[MOTOR_RR] = 0U;
+
+        /* 锁存故障位重新并回活动诊断位图，防止被其他逻辑误清。 */
+        s_diag_bits |= s_latched_fault_bits;
+
+        /* 关键点：
+         * - 没有锁存 STALL：允许恢复到 OPERATIONAL
+         * - 有锁存 STALL：保持 SAFE_FAULT，不允许继续驱动
+         */
+        if ((s_latched_fault_bits & stall_mask) == 0U)
+        {
+            g_robot_ctrl.state = SYSTEM_OPERATIONAL;
+        }
+        else
+        {
+            g_robot_ctrl.state = SYSTEM_SAFE_FAULT;
+            CAN_ResetMotionCommand();
+        }
 
         __set_PRIMASK(primask);
     }
@@ -466,6 +505,8 @@ void CAN_App_Init(void)
     s_counter_synced = false;
 
     s_diag_bits = 0U;
+    s_latched_fault_bits = 0U;
+
     s_valid_cmd_total = 0U;
     s_crc_error_total = 0U;
     s_counter_reject_total = 0U;
@@ -646,6 +687,13 @@ void Chassis_Diagnostics_10ms_Tick(void)
         s_stall_ticks[MOTOR_RR] = 0U;
         s_saturation_ticks = 0U;
         CAN_ClearDiagBits(DIAG_CONTROL_SATURATION);
+
+        /* 锁存的 STALL 必须一直保留。 */
+        if ((s_latched_fault_bits & motor_stall_mask) != 0U)
+        {
+            CAN_SetDiagBits(s_latched_fault_bits & motor_stall_mask);
+        }
+
         return;
     }
 
@@ -677,7 +725,12 @@ void Chassis_Diagnostics_10ms_Tick(void)
         else
         {
             s_stall_ticks[i] = 0U;
-            CAN_ClearDiagBits(bit);
+
+            /* 仅对“未锁存”的 stall 位允许自动清除。 */
+            if ((s_latched_fault_bits & bit) == 0U)
+            {
+                CAN_ClearDiagBits(bit);
+            }
         }
 
         if (s_stall_ticks[i] >= STALL_CONFIRM_TICKS)
@@ -692,7 +745,9 @@ void Chassis_Diagnostics_10ms_Tick(void)
     }
     else
     {
-        CAN_ClearDiagBits(motor_stall_mask);
+        /* 未锁存的 stall 位可以清；锁存的必须保留。 */
+        CAN_ClearDiagBits(motor_stall_mask & (~s_latched_fault_bits));
+        CAN_SetDiagBits(s_latched_fault_bits & motor_stall_mask);
     }
 
     {
@@ -729,7 +784,6 @@ void Chassis_Diagnostics_10ms_Tick(void)
         }
     }
 }
-
 /* =====================================================================
  * 周期发送
  * ===================================================================== */
