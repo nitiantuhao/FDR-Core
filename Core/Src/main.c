@@ -137,6 +137,7 @@ int main(void)
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   FourWheel_LADRC_Init();
+  HAL_Delay(1000);
   CAN_App_Init();
 
   /* 启动 10ms 硬实时控制节拍。 */
